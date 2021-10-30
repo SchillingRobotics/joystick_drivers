@@ -65,6 +65,7 @@ private:
   void handleJoyDeviceRemoved(const SDL_Event & e);
   float convertRawAxisValueToROS(int16_t val);
   void feedbackCb(const std::shared_ptr<sensor_msgs::msg::JoyFeedback> msg);
+  bool publishSoonNow();
 
   int dev_id_{0};
 

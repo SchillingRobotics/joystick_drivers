@@ -176,6 +176,21 @@ float Joy::convertRawAxisValueToROS(int16_t val)
   return static_cast<float>(double_val * scale_);
 }
 
+bool Joy::publishSoonNow()
+{
+  bool publish_now = false;
+
+  // coalescing disabled or nothing to coalesce?
+  if (!(coalesce_interval_ms_ > 0) || !publish_soon_) return publish_now;
+
+  rclcpp::Duration time_since_publish_soon = this->now() - publish_soon_time_;
+  if (time_since_publish_soon.nanoseconds() >= RCL_MS_TO_NS(coalesce_interval_ms_)) {
+    publish_now = true;
+  }
+
+  return publish_now;
+}
+
 bool Joy::handleJoyAxis(const SDL_Event & e)
 {
   bool publish = false;
@@ -196,11 +211,8 @@ bool Joy::handleJoyAxis(const SDL_Event & e)
       publish_soon_ = true;
       publish_soon_time_ = this->now();
     } else {
-      rclcpp::Duration time_since_publish_soon = this->now() - publish_soon_time_;
-      if (time_since_publish_soon.nanoseconds() >= RCL_MS_TO_NS(coalesce_interval_ms_)) {
-        publish = true;
-        publish_soon_ = false;
-      }
+      publish = publishSoonNow();
+      if (publish) publish_soon_ = false;
     }
   }
   // else no change, so don't publish
@@ -431,9 +443,15 @@ void Joy::eventThread()
 
     bool should_publish = false;
     SDL_Event e;
-    int wait_time_ms = autorepeat_interval_ms_;
+    rclcpp::Time now = this->now();
+    rclcpp::Duration diff_since_last_publish = now - last_publish;
+    int wait_time_ms = autorepeat_interval_ms_ - RCL_NS_TO_MS(diff_since_last_publish.nanoseconds());
+    wait_time_ms = std::max(wait_time_ms, 1);
     if (publish_soon_) {
-      wait_time_ms = std::min(wait_time_ms, coalesce_interval_ms_);
+      diff_since_last_publish = now - publish_soon_time_;
+      int wait_time_coalesce_ms = coalesce_interval_ms_ - RCL_NS_TO_MS(diff_since_last_publish.nanoseconds());
+      wait_time_coalesce_ms = std::max(wait_time_coalesce_ms, 1);
+      wait_time_ms = std::min(wait_time_ms, wait_time_coalesce_ms);
     }
     int success = SDL_WaitEventTimeout(&e, wait_time_ms);
     if (success == 1) {
@@ -453,16 +471,16 @@ void Joy::eventThread()
       } else {
         RCLCPP_INFO(get_logger(), "Unknown event type %d", e.type);
       }
-    } else {
+    } 
+    if (!should_publish) {
       // We didn't succeed, either because of a failure or because of a timeout.
       // If we are autorepeating and enough time has passed, set should_publish.
-      rclcpp::Time now = this->now();
-      rclcpp::Duration diff_since_last_publish = now - last_publish;
+      now = this->now();
+      diff_since_last_publish = now - last_publish;
       if ((autorepeat_rate_ > 0.0 &&
         RCL_NS_TO_MS(diff_since_last_publish.nanoseconds()) >= autorepeat_interval_ms_) ||
-        publish_soon_)
+        publishSoonNow())
       {
-        last_publish = now;
         should_publish = true;
         publish_soon_ = false;
       }
@@ -470,7 +488,7 @@ void Joy::eventThread()
 
     if (joystick_ != nullptr && should_publish) {
       joy_msg_.header.frame_id = "joy";
-      joy_msg_.header.stamp = this->now();
+      joy_msg_.header.stamp = last_publish = this->now();
 
       pub_->publish(joy_msg_);
     }
